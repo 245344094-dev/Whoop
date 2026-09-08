@@ -367,18 +367,71 @@ def push_to_serverchan(title, content):
         return False
 
 
+AUTH_URL = ("https://api.prod.whoop.com/oauth/oauth2/auth"
+            f"?client_id={CLIENT_ID}"
+            "&response_type=code"
+            "&redirect_uri=https%3A%2F%2Flocalhost%3A3000%2Fcallback"
+            "&scope=read%3Arecovery+read%3Acycles+read%3Asleep+read%3Aworkout+read%3Aprofile+read%3Abody_measurement+offline"
+            "&state=mywhoopstate12345678")
+
+
+def notify_token_expired(error_msg=""):
+    """When refresh_token is dead, push a WeChat notification asking user to re-authorize."""
+    now_str = datetime.now(tz8).strftime("%Y-%m-%d %H:%M")
+    title = "⚠️ Whoop Token过期 需重新授权"
+    content = (
+        f"**Whoop 自动报告中断**\n\n"
+        f"时间: {now_str}\n\n"
+        f"原因: refresh_token 已失效{f' ({error_msg})' if error_msg else ''}\n\n"
+        f"**请按以下步骤操作：**\n\n"
+        f"1️⃣ 手机或电脑浏览器打开:\n"
+        f"{AUTH_URL}\n\n"
+        f"2️⃣ 登录 Whoop 并授权\n\n"
+        f"3️⃣ 授权后页面会跳转（可能显示无法访问，没关系）\n"
+        f"复制浏览器地址栏完整 URL\n\n"
+        f"4️⃣ 把 URL 发给小飞象，它会自动换 token 并恢复每日报告\n\n"
+        f"⏰ 授权后约 1-2 天 token 会再次过期，届时会自动提醒你"
+    )
+    push_to_serverchan(title, content)
+    print(f"Token expired notification sent to WeChat! Error: {error_msg}")
+
+
 def main():
     # 1. Load & refresh token
     token = load_token()
-    token = refresh_token(token)
+
+    try:
+        token = refresh_token(token)
+    except urllib.error.HTTPError as e:
+        err_body = ""
+        try:
+            err_body = e.read().decode()[:200]
+        except:
+            pass
+        print(f"Token refresh FAILED: HTTP {e.code} - {err_body}")
+        # Token is dead — notify user via WeChat
+        notify_token_expired(f"HTTP {e.code}")
+        # Also try to save what we have
+        sys.exit(1)
+    except Exception as e:
+        print(f"Token refresh FAILED: {e}")
+        notify_token_expired(str(e)[:100])
+        sys.exit(1)
+
     access_token = token["access_token"]
 
     # 2. Fetch all data
     print("Fetching Whoop data...")
-    recovery = api_get(f"{BASE}/recovery", access_token)
-    cycle = api_get(f"{BASE}/cycle", access_token)
-    sleep = api_get(f"{BASE}/activity/sleep", access_token)
-    workout = api_get(f"{BASE}/activity/workout", access_token)
+    try:
+        recovery = api_get(f"{BASE}/recovery", access_token)
+        cycle = api_get(f"{BASE}/cycle", access_token)
+        sleep = api_get(f"{BASE}/activity/sleep", access_token)
+        workout = api_get(f"{BASE}/activity/workout", access_token)
+    except urllib.error.HTTPError as e:
+        print(f"API call FAILED: HTTP {e.code}")
+        if e.code == 401:
+            notify_token_expired("access_token 401")
+        sys.exit(1)
     print("Data fetched OK")
 
     # 3. Generate report
